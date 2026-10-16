@@ -141,6 +141,10 @@
             "name": "Бърз клавиш за отказ",
             "description": "Клавишната комбинация за отмяна на текущия запис."
           },
+          "confirm": {
+            "name": "Confirm / Finish & Paste",
+            "description": "Finishes recording and pastes transcription (default Enter)."
+          },
           "transcribe_with_post_process": {
             "name": "Бърз клавиш за постобработка",
             "description": "По избор: отделна комбинация, която винаги прилага ИИ постобработка върху транскрипцията."

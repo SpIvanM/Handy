@@ -168,6 +168,10 @@
             "name": "İptal Kısayolu",
             "description": "Mevcut kaydı iptal etmek için klavye kısayolu."
           },
+          "confirm": {
+            "name": "Confirm / Finish & Paste",
+            "description": "Finishes recording and pastes transcription (default Enter)."
+          },
           "transcribe_with_post_process": {
             "name": "Son İşlem Kısayolu",
             "description": "İsteğe bağlı: Transkripsiyonunuza her zaman yapay zekâ ile son işlem uygulayan özel bir kısayol tuşu."

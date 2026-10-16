@@ -141,6 +141,10 @@
             "name": "Drecera de cancel·lació",
             "description": "La drecera de teclat per cancel·lar l'enregistrament actual."
           },
+          "confirm": {
+            "name": "Confirm / Finish & Paste",
+            "description": "Finishes recording and pastes transcription (default Enter)."
+          },
           "transcribe_with_post_process": {
             "name": "Drecera de postprocessament",
             "description": "Opcional: una drecera específica que sempre aplica postprocessament amb IA a la transcripció."

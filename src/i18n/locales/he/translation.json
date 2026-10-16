@@ -141,6 +141,10 @@
             "name": "קיצור מקשים לביטול",
             "description": "קיצור המקלדת לביטול ההקלטה הנוכחית."
           },
+          "confirm": {
+            "name": "Confirm / Finish & Paste",
+            "description": "Finishes recording and pastes transcription (default Enter)."
+          },
           "transcribe_with_post_process": {
             "name": "קיצור לעיבוד משלים",
             "description": "אופציונלי: קיצור מקשים ייעודי שתמיד מפעיל עיבוד AI על התמלול."

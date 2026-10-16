@@ -141,6 +141,10 @@
             "name": "Гаряча клавіша скасування",
             "description": "Комбінація клавіш для скасування поточного запису."
           },
+          "confirm": {
+            "name": "Confirm / Finish & Paste",
+            "description": "Finishes recording and pastes transcription (default Enter)."
+          },
           "transcribe_with_post_process": {
             "name": "Гаряча клавіша постобробки",
             "description": "Необов'язково: Спеціальна гаряча клавіша, яка завжди застосовує AI-постобробку до вашої транскрипції."

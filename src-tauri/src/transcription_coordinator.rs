@@ -170,6 +170,7 @@ enum Effect {
 /// Commands processed sequentially by the coordinator thread.
 enum Command {
     Input(InputEvent),
+    Confirm,
     Cancel { recording_was_active: bool },
     ProcessingFinished,
 }
@@ -458,6 +459,17 @@ impl CoordinatorState {
         None
     }
 
+    fn on_confirm(&mut self, hotkey_string: String) -> Option<Effect> {
+        self.pending_release = None;
+        match &self.stage {
+            Stage::Recording(active_binding) => {
+                let binding = active_binding.clone();
+                Some(self.begin_processing(binding, hotkey_string))
+            }
+            _ => None,
+        }
+    }
+
     fn on_cancel(&mut self, recording_was_active: bool) {
         self.pending_release = None;
         // An explicit cancel abandons any remembered start too — the user
@@ -571,6 +583,16 @@ impl TranscriptionCoordinator {
                                 run_effect(&app, &mut state, effect);
                             }
                         }
+                        Command::Confirm => {
+                            let hotkey_string = crate::settings::get_settings(&app)
+                                .bindings
+                                .get("confirm")
+                                .map(|b| b.current_binding.clone())
+                                .unwrap_or_else(|| "enter".to_string());
+                            if let Some(effect) = state.on_confirm(hotkey_string) {
+                                run_effect(&app, &mut state, effect);
+                            }
+                        }
                         Command::Cancel {
                             recording_was_active,
                         } => state.on_cancel(recording_was_active),
@@ -645,6 +667,12 @@ impl TranscriptionCoordinator {
             }))
             .is_err()
         {
+            warn!("Transcription coordinator channel closed");
+        }
+    }
+
+    pub fn confirm(&self) {
+        if self.tx.send(Command::Confirm).is_err() {
             warn!("Transcription coordinator channel closed");
         }
     }
@@ -1611,6 +1639,80 @@ mod tests {
         assert!(
             matches!(state.on_grace_expired(), Some(Effect::Stop { .. })),
             "held 400ms since the real key-down: must stop, not lock"
+        );
+        assert_eq!(state.stage, Stage::Processing);
+    }
+
+    #[test]
+    fn confirm_shortcut_transitions() {
+        let confirm_hotkey = "enter".to_string();
+
+        // 1. confirm in Idle -> None
+        let mut state = CoordinatorState::new();
+        assert_eq!(state.stage, Stage::Idle);
+        assert_eq!(state.on_confirm(confirm_hotkey.clone()), None);
+        assert_eq!(state.stage, Stage::Idle);
+
+        // 2. confirm in Recording -> Stop with the same binding
+        let t0 = Instant::now();
+        assert!(matches!(
+            state.on_input(input(ShortcutActivation::Toggle, true), t0),
+            Some(Effect::Start { .. })
+        ));
+        assert_eq!(state.stage, Stage::Recording("transcribe".to_string()));
+        let effect = state.on_confirm(confirm_hotkey.clone());
+        assert_eq!(
+            effect,
+            Some(Effect::Stop {
+                binding_id: "transcribe".to_string(),
+                hotkey_string: "enter".to_string(),
+            })
+        );
+        assert_eq!(state.stage, Stage::Processing);
+
+        // 3. confirm in Processing -> None
+        assert_eq!(state.on_confirm(confirm_hotkey.clone()), None);
+        assert_eq!(state.stage, Stage::Processing);
+
+        // Reset to Idle
+        assert!(state.on_processing_finished().is_none());
+        assert_eq!(state.stage, Stage::Idle);
+
+        // 4. confirm after cancel -> None
+        assert!(matches!(
+            state.on_input(input(ShortcutActivation::Toggle, true), t0 + ms(1000)),
+            Some(Effect::Start { .. })
+        ));
+        assert_eq!(state.stage, Stage::Recording("transcribe".to_string()));
+        state.on_cancel(true);
+        assert_eq!(state.stage, Stage::Idle);
+        assert_eq!(state.on_confirm(confirm_hotkey.clone()), None);
+        assert_eq!(state.stage, Stage::Idle);
+
+        // 5. confirm preserves post-process binding
+        let post_process_input = InputEvent {
+            binding_id: "transcribe_with_post_process".to_string(),
+            hotkey_string: "ctrl+space".to_string(),
+            is_pressed: true,
+            mode: ShortcutActivation::Toggle,
+            hold_threshold: Duration::ZERO,
+            external: false,
+        };
+        assert!(matches!(
+            state.on_input(post_process_input, t0 + ms(2000)),
+            Some(Effect::Start { .. })
+        ));
+        assert_eq!(
+            state.stage,
+            Stage::Recording("transcribe_with_post_process".to_string())
+        );
+        let effect = state.on_confirm(confirm_hotkey);
+        assert_eq!(
+            effect,
+            Some(Effect::Stop {
+                binding_id: "transcribe_with_post_process".to_string(),
+                hotkey_string: "enter".to_string(),
+            })
         );
         assert_eq!(state.stage, Stage::Processing);
     }

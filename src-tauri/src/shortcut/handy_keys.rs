@@ -41,6 +41,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::settings::{self, get_settings, ShortcutBinding};
 
 use super::handler::handle_shortcut_event;
+use super::is_dynamic_recording_shortcut;
 
 /// Commands that can be sent to the hotkey manager thread
 enum ManagerCommand {
@@ -428,9 +429,9 @@ pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
     let default_bindings = settings::get_default_settings().bindings;
     let user_settings = settings::load_or_create_app_settings(app);
 
-    // Register all bindings except cancel (which is dynamic)
+    // Register all bindings except dynamic ones (which are registered on demand)
     for (id, default_binding) in default_bindings {
-        if id == "cancel" {
+        if is_dynamic_recording_shortcut(&id) {
             continue;
         }
         // Skip post-processing shortcut when the feature is disabled

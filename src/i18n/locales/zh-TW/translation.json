@@ -141,6 +141,10 @@
             "name": "取消快捷鍵",
             "description": "用於取消目前錄製的鍵盤快捷鍵"
           },
+          "confirm": {
+            "name": "Confirm / Finish & Paste",
+            "description": "Finishes recording and pastes transcription (default Enter)."
+          },
           "transcribe_with_post_process": {
             "name": "後處理快捷鍵",
             "description": "可選：專用快捷鍵，使用時一律對轉錄結果套用 AI 後處理"

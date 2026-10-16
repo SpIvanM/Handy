@@ -50,6 +50,19 @@ pub fn handle_shortcut_event(
         return;
     }
 
+    // Confirm binding: only fires when recording and key is pressed
+    if binding_id == "confirm" {
+        let audio_manager = app.state::<Arc<AudioRecordingManager>>();
+        if audio_manager.is_recording() && is_pressed {
+            if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
+                coordinator.confirm();
+            } else {
+                warn!("TranscriptionCoordinator is not initialized");
+            }
+        }
+        return;
+    }
+
     let Some(action) = ACTION_MAP.get(binding_id) else {
         warn!(
             "No action defined in ACTION_MAP for shortcut ID '{}'. Shortcut: '{}', Pressed: {}",

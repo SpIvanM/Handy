@@ -957,6 +957,16 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: "escape".to_string(),
         },
     );
+    bindings.insert(
+        "confirm".to_string(),
+        ShortcutBinding {
+            id: "confirm".to_string(),
+            name: "Confirm / Finish & Paste".to_string(),
+            description: "Finishes recording and pastes transcription.".to_string(),
+            default_binding: "enter".to_string(),
+            current_binding: "enter".to_string(),
+        },
+    );
 
     AppSettings {
         settings_schema_version: default_settings_schema_version(),

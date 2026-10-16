@@ -56,14 +56,22 @@ pub fn init_shortcuts(app: &AppHandle) {
     }
 }
 
-/// Whether the recording lifecycle currently wants the cancel shortcut.
+/// Returns true if a shortcut binding is dynamically registered during recording
+/// rather than statically on app startup.
+pub fn is_dynamic_recording_shortcut(id: &str) -> bool {
+    id == "cancel" || id == "confirm"
+}
+
+/// Whether the recording lifecycle currently wants dynamic shortcuts (cancel + confirm).
 /// Written synchronously by start/stop, so it always holds the latest request.
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the cancel shortcut is actually registered with the backend.
-/// The lock also serializes reconciliation passes.
+/// Whether dynamic shortcuts are actually registered with the backend.
+/// The locks also serialize reconciliation passes.
 #[cfg(not(target_os = "linux"))]
 static CANCEL_REGISTERED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+#[cfg(not(target_os = "linux"))]
+static CONFIRM_REGISTERED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
 /// Register the cancel shortcut (called when recording starts)
 pub fn register_cancel_shortcut(app: &AppHandle) {
@@ -96,7 +104,7 @@ fn schedule_cancel_reconcile(app: &AppHandle) {
 }
 
 fn reconcile_cancel_shortcut(app: &AppHandle) {
-    // Cancel shortcut is disabled on Linux due to instability with dynamic shortcut registration
+    // Dynamic shortcuts are disabled on Linux due to instability with dynamic shortcut registration
     #[cfg(target_os = "linux")]
     {
         let _ = app;
@@ -105,25 +113,42 @@ fn reconcile_cancel_shortcut(app: &AppHandle) {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let mut registered = CANCEL_REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cancel_registered = CANCEL_REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut confirm_registered = CONFIRM_REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
         let requested = CANCEL_REQUESTED.load(Ordering::SeqCst);
-        if requested == *registered {
-            return;
+        let settings = get_settings(app);
+
+        // Cancel shortcut
+        if requested != *cancel_registered {
+            if let Some(cancel_binding) = settings.bindings.get("cancel").cloned() {
+                if requested {
+                    match register_shortcut(app, cancel_binding) {
+                        Ok(()) => *cancel_registered = true,
+                        Err(e) => error!("Failed to register cancel shortcut: {}", e),
+                    }
+                } else {
+                    match unregister_shortcut(app, cancel_binding) {
+                        Ok(()) => *cancel_registered = false,
+                        Err(e) => error!("Failed to unregister cancel shortcut: {}", e),
+                    }
+                }
+            }
         }
 
-        let Some(cancel_binding) = get_settings(app).bindings.get("cancel").cloned() else {
-            return;
-        };
-
-        if requested {
-            match register_shortcut(app, cancel_binding) {
-                Ok(()) => *registered = true,
-                Err(e) => error!("Failed to register cancel shortcut: {}", e),
-            }
-        } else {
-            match unregister_shortcut(app, cancel_binding) {
-                Ok(()) => *registered = false,
-                Err(e) => error!("Failed to unregister cancel shortcut: {}", e),
+        // Confirm shortcut
+        if requested != *confirm_registered {
+            if let Some(confirm_binding) = settings.bindings.get("confirm").cloned() {
+                if requested {
+                    match register_shortcut(app, confirm_binding) {
+                        Ok(()) => *confirm_registered = true,
+                        Err(e) => error!("Failed to register confirm shortcut: {}", e),
+                    }
+                } else {
+                    match unregister_shortcut(app, confirm_binding) {
+                        Ok(()) => *confirm_registered = false,
+                        Err(e) => error!("Failed to unregister confirm shortcut: {}", e),
+                    }
+                }
             }
         }
     }
@@ -199,9 +224,9 @@ pub fn change_binding(
         }
     };
 
-    // If this is the cancel binding, just update the settings and return
+    // If this is a dynamic recording binding, just update the settings and return
     // It's managed dynamically, so we don't register/unregister here
-    if id == "cancel" {
+    if is_dynamic_recording_shortcut(&id) {
         if let Some(mut b) = settings.bindings.get(&id).cloned() {
             b.current_binding = binding;
             settings.bindings.insert(id.clone(), b.clone());
@@ -284,7 +309,7 @@ pub fn reset_binding(app: AppHandle, id: String) -> Result<BindingResponse, Stri
 /// by the recording lifecycle.
 pub fn suspend_all_shortcuts(app: &AppHandle) {
     for (id, binding) in settings::get_bindings(app) {
-        if id == "cancel" {
+        if is_dynamic_recording_shortcut(&id) {
             continue;
         }
         if let Err(e) = unregister_shortcut(app, binding) {
@@ -302,7 +327,7 @@ pub fn suspend_all_shortcuts(app: &AppHandle) {
 pub fn resume_all_shortcuts(app: &AppHandle) {
     let settings = get_settings(app);
     for (id, binding) in &settings.bindings {
-        if id == "cancel" {
+        if is_dynamic_recording_shortcut(id) {
             continue;
         }
         if id == "transcribe_with_post_process" && !settings.post_process_enabled {
@@ -462,8 +487,8 @@ fn unregister_all_shortcuts(app: &AppHandle, implementation: KeyboardImplementat
     let bindings = settings::get_bindings(app);
 
     for (id, binding) in bindings {
-        // Skip cancel shortcut as it's dynamically registered
-        if id == "cancel" {
+        // Skip dynamic shortcuts as they are dynamically registered
+        if is_dynamic_recording_shortcut(&id) {
             continue;
         }
 
@@ -491,8 +516,8 @@ fn register_all_shortcuts_for_implementation(
     let mut current_settings = settings::get_settings(app);
 
     for (id, default_binding) in &default_bindings {
-        // Skip cancel shortcut as it's dynamically registered
-        if id == "cancel" {
+        // Skip dynamic shortcuts as they are dynamically registered
+        if is_dynamic_recording_shortcut(id) {
             continue;
         }
 

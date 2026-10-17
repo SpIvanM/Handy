@@ -1644,23 +1644,24 @@ mod tests {
     }
 
     #[test]
-    fn confirm_shortcut_transitions() {
-        let confirm_hotkey = "enter".to_string();
-
-        // 1. confirm in Idle -> None
+    fn confirm_in_idle_does_nothing() {
         let mut state = CoordinatorState::new();
         assert_eq!(state.stage, Stage::Idle);
-        assert_eq!(state.on_confirm(confirm_hotkey.clone()), None);
+        assert_eq!(state.on_confirm("enter".to_string()), None);
         assert_eq!(state.stage, Stage::Idle);
+    }
 
-        // 2. confirm in Recording -> Stop with the same binding
+    #[test]
+    fn confirm_in_recording_stops_and_begins_processing() {
+        let mut state = CoordinatorState::new();
         let t0 = Instant::now();
         assert!(matches!(
             state.on_input(input(ShortcutActivation::Toggle, true), t0),
             Some(Effect::Start { .. })
         ));
         assert_eq!(state.stage, Stage::Recording("transcribe".to_string()));
-        let effect = state.on_confirm(confirm_hotkey.clone());
+
+        let effect = state.on_confirm("enter".to_string());
         assert_eq!(
             effect,
             Some(Effect::Stop {
@@ -1669,27 +1670,48 @@ mod tests {
             })
         );
         assert_eq!(state.stage, Stage::Processing);
+    }
 
-        // 3. confirm in Processing -> None
-        assert_eq!(state.on_confirm(confirm_hotkey.clone()), None);
-        assert_eq!(state.stage, Stage::Processing);
-
-        // Reset to Idle
-        assert!(state.on_processing_finished().is_none());
-        assert_eq!(state.stage, Stage::Idle);
-
-        // 4. confirm after cancel -> None
+    #[test]
+    fn confirm_in_processing_does_nothing() {
+        let mut state = CoordinatorState::new();
+        let t0 = Instant::now();
         assert!(matches!(
-            state.on_input(input(ShortcutActivation::Toggle, true), t0 + ms(1000)),
+            state.on_input(input(ShortcutActivation::Toggle, true), t0),
             Some(Effect::Start { .. })
         ));
         assert_eq!(state.stage, Stage::Recording("transcribe".to_string()));
+
+        let effect = state.on_confirm("enter".to_string());
+        assert!(matches!(effect, Some(Effect::Stop { .. })));
+        assert_eq!(state.stage, Stage::Processing);
+
+        // While in Processing, subsequent confirm produces no effect and stays in Processing
+        assert_eq!(state.on_confirm("enter".to_string()), None);
+        assert_eq!(state.stage, Stage::Processing);
+    }
+
+    #[test]
+    fn confirm_after_cancel_does_nothing() {
+        let mut state = CoordinatorState::new();
+        let t0 = Instant::now();
+        assert!(matches!(
+            state.on_input(input(ShortcutActivation::Toggle, true), t0),
+            Some(Effect::Start { .. })
+        ));
+        assert_eq!(state.stage, Stage::Recording("transcribe".to_string()));
+
         state.on_cancel(true);
         assert_eq!(state.stage, Stage::Idle);
-        assert_eq!(state.on_confirm(confirm_hotkey.clone()), None);
-        assert_eq!(state.stage, Stage::Idle);
 
-        // 5. confirm preserves post-process binding
+        assert_eq!(state.on_confirm("enter".to_string()), None);
+        assert_eq!(state.stage, Stage::Idle);
+    }
+
+    #[test]
+    fn confirm_preserves_post_process_binding() {
+        let mut state = CoordinatorState::new();
+        let t0 = Instant::now();
         let post_process_input = InputEvent {
             binding_id: "transcribe_with_post_process".to_string(),
             hotkey_string: "ctrl+space".to_string(),
@@ -1699,14 +1721,15 @@ mod tests {
             external: false,
         };
         assert!(matches!(
-            state.on_input(post_process_input, t0 + ms(2000)),
+            state.on_input(post_process_input, t0),
             Some(Effect::Start { .. })
         ));
         assert_eq!(
             state.stage,
             Stage::Recording("transcribe_with_post_process".to_string())
         );
-        let effect = state.on_confirm(confirm_hotkey);
+
+        let effect = state.on_confirm("enter".to_string());
         assert_eq!(
             effect,
             Some(Effect::Stop {
@@ -1715,5 +1738,99 @@ mod tests {
             })
         );
         assert_eq!(state.stage, Stage::Processing);
+    }
+
+    #[test]
+    fn confirm_resets_pending_release() {
+        let mut state = CoordinatorState::new();
+        let t0 = Instant::now();
+
+        // Start recording in push-to-talk mode
+        let ptt_press = input(ShortcutActivation::PushToTalk, true);
+        assert!(matches!(
+            state.on_input(ptt_press, t0),
+            Some(Effect::Start { .. })
+        ));
+        assert_eq!(state.stage, Stage::Recording("transcribe".to_string()));
+
+        // Release the key during recording: this defers release within RELEASE_GRACE
+        let ptt_release = input(ShortcutActivation::PushToTalk, false);
+        assert_eq!(state.on_input(ptt_release, t0 + ms(100)), None);
+        assert!(
+            state.pending_release.is_some(),
+            "precondition: pending_release must be set before confirm"
+        );
+        assert!(
+            state.grace_deadline().is_some(),
+            "precondition: grace_deadline must be set before confirm"
+        );
+
+        // Confirm while release grace is pending
+        let effect = state.on_confirm("enter".to_string());
+        assert_eq!(
+            effect,
+            Some(Effect::Stop {
+                binding_id: "transcribe".to_string(),
+                hotkey_string: "enter".to_string(),
+            })
+        );
+        assert_eq!(state.stage, Stage::Processing);
+
+        // on_confirm must reset pending_release and clear grace_deadline
+        assert!(
+            state.pending_release.is_none(),
+            "on_confirm must reset pending_release"
+        );
+        assert_eq!(
+            state.grace_deadline(),
+            None,
+            "on_confirm must clear grace_deadline"
+        );
+
+        // Grace expiry must produce no effect
+        assert_eq!(state.on_grace_expired(), None);
+
+        // Subsequent press during Processing must be remembered as BusyAction::Remember,
+        // not swallowed as CancelRelease
+        let busy_press = input(ShortcutActivation::PushToTalk, true);
+        assert_eq!(state.on_input(busy_press, t0 + ms(150)), None);
+        assert!(
+            state.pending_press.is_some(),
+            "press during processing must be remembered, not swallowed as CancelRelease"
+        );
+    }
+
+    #[test]
+    fn push_to_talk_confirm_during_hold_ignores_subsequent_release() {
+        let mut state = CoordinatorState::new();
+        let t0 = Instant::now();
+
+        // Hold PTT key down to start recording
+        let ptt_press = input(ShortcutActivation::PushToTalk, true);
+        assert!(matches!(
+            state.on_input(ptt_press, t0),
+            Some(Effect::Start { .. })
+        ));
+        assert_eq!(state.stage, Stage::Recording("transcribe".to_string()));
+
+        // Confirm while key is still held down
+        let effect = state.on_confirm("enter".to_string());
+        assert_eq!(
+            effect,
+            Some(Effect::Stop {
+                binding_id: "transcribe".to_string(),
+                hotkey_string: "enter".to_string(),
+            })
+        );
+        assert_eq!(state.stage, Stage::Processing);
+        assert!(state.pending_release.is_none());
+
+        // Late release of the PTT key arrives while pipeline is Processing:
+        // it must be safely ignored and not start a new session or set pending release
+        let ptt_release = input(ShortcutActivation::PushToTalk, false);
+        assert_eq!(state.on_input(ptt_release, t0 + ms(500)), None);
+        assert_eq!(state.stage, Stage::Processing);
+        assert!(state.pending_press.is_none());
+        assert!(state.pending_release.is_none());
     }
 }

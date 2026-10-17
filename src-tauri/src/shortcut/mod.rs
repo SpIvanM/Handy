@@ -56,22 +56,55 @@ pub fn init_shortcuts(app: &AppHandle) {
     }
 }
 
+pub const DYNAMIC_SHORTCUT_IDS: &[&str] = &["cancel", "confirm"];
+
 /// Returns true if a shortcut binding is dynamically registered during recording
 /// rather than statically on app startup.
 pub fn is_dynamic_recording_shortcut(id: &str) -> bool {
-    id == "cancel" || id == "confirm"
+    DYNAMIC_SHORTCUT_IDS.contains(&id)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReconcileAction {
+    Noop,
+    UnregisterOnly(String),
+    RegisterOnly(String),
+    Rebind {
+        unregister: String,
+        register: String,
+    },
+}
+
+pub(crate) fn compute_reconcile_action(
+    currently_registered: Option<&str>,
+    requested: bool,
+    configured: Option<&str>,
+) -> ReconcileAction {
+    let target = if requested { configured } else { None };
+    if currently_registered == target {
+        return ReconcileAction::Noop;
+    }
+    match (currently_registered, target) {
+        (Some(old), Some(new)) => ReconcileAction::Rebind {
+            unregister: old.to_string(),
+            register: new.to_string(),
+        },
+        (Some(old), None) => ReconcileAction::UnregisterOnly(old.to_string()),
+        (None, Some(new)) => ReconcileAction::RegisterOnly(new.to_string()),
+        (None, None) => ReconcileAction::Noop,
+    }
 }
 
 /// Whether the recording lifecycle currently wants dynamic shortcuts (cancel + confirm).
 /// Written synchronously by start/stop, so it always holds the latest request.
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Whether dynamic shortcuts are actually registered with the backend.
-/// The locks also serialize reconciliation passes.
+/// The hotkey strings currently registered with the backend for each dynamic shortcut ID.
+/// The lock also serializes reconciliation passes.
 #[cfg(not(target_os = "linux"))]
-static CANCEL_REGISTERED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
-#[cfg(not(target_os = "linux"))]
-static CONFIRM_REGISTERED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+static DYNAMIC_REGISTERED: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Register the cancel shortcut (called when recording starts)
 pub fn register_cancel_shortcut(app: &AppHandle) {
@@ -103,6 +136,39 @@ fn schedule_cancel_reconcile(app: &AppHandle) {
     });
 }
 
+#[cfg(not(target_os = "linux"))]
+fn unregister_dynamic_binding(
+    app: &AppHandle,
+    id: &str,
+    key_to_unregister: String,
+    configured_binding: Option<&ShortcutBinding>,
+) {
+    let mut binding = configured_binding
+        .cloned()
+        .unwrap_or_else(|| ShortcutBinding {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            default_binding: key_to_unregister.clone(),
+            current_binding: key_to_unregister.clone(),
+        });
+    binding.current_binding = key_to_unregister;
+    if let Err(e) = unregister_shortcut(app, binding) {
+        error!("Failed to unregister {} shortcut: {}", id, e);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn register_dynamic_binding(app: &AppHandle, id: &str, binding: ShortcutBinding) -> bool {
+    match register_shortcut(app, binding) {
+        Ok(()) => true,
+        Err(e) => {
+            error!("Failed to register {} shortcut: {}", id, e);
+            false
+        }
+    }
+}
+
 fn reconcile_cancel_shortcut(app: &AppHandle) {
     // Dynamic shortcuts are disabled on Linux due to instability with dynamic shortcut registration
     #[cfg(target_os = "linux")]
@@ -113,40 +179,40 @@ fn reconcile_cancel_shortcut(app: &AppHandle) {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let mut cancel_registered = CANCEL_REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
-        let mut confirm_registered = CONFIRM_REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registered_map = DYNAMIC_REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
         let requested = CANCEL_REQUESTED.load(Ordering::SeqCst);
         let settings = get_settings(app);
 
-        // Cancel shortcut
-        if requested != *cancel_registered {
-            if let Some(cancel_binding) = settings.bindings.get("cancel").cloned() {
-                if requested {
-                    match register_shortcut(app, cancel_binding) {
-                        Ok(()) => *cancel_registered = true,
-                        Err(e) => error!("Failed to register cancel shortcut: {}", e),
-                    }
-                } else {
-                    match unregister_shortcut(app, cancel_binding) {
-                        Ok(()) => *cancel_registered = false,
-                        Err(e) => error!("Failed to unregister cancel shortcut: {}", e),
+        for &id in DYNAMIC_SHORTCUT_IDS {
+            let registered_key = registered_map.get(id).cloned();
+            let configured_binding = settings.bindings.get(id).cloned();
+            let configured_key = configured_binding
+                .as_ref()
+                .map(|b| b.current_binding.as_str());
+
+            match compute_reconcile_action(registered_key.as_deref(), requested, configured_key) {
+                ReconcileAction::Noop => {}
+                ReconcileAction::UnregisterOnly(old_key) => {
+                    unregister_dynamic_binding(app, id, old_key, configured_binding.as_ref());
+                    registered_map.remove(id);
+                }
+                ReconcileAction::RegisterOnly(new_key) => {
+                    if let Some(new_binding) = configured_binding {
+                        if register_dynamic_binding(app, id, new_binding) {
+                            registered_map.insert(id.to_string(), new_key);
+                        }
                     }
                 }
-            }
-        }
-
-        // Confirm shortcut
-        if requested != *confirm_registered {
-            if let Some(confirm_binding) = settings.bindings.get("confirm").cloned() {
-                if requested {
-                    match register_shortcut(app, confirm_binding) {
-                        Ok(()) => *confirm_registered = true,
-                        Err(e) => error!("Failed to register confirm shortcut: {}", e),
-                    }
-                } else {
-                    match unregister_shortcut(app, confirm_binding) {
-                        Ok(()) => *confirm_registered = false,
-                        Err(e) => error!("Failed to unregister confirm shortcut: {}", e),
+                ReconcileAction::Rebind {
+                    unregister,
+                    register,
+                } => {
+                    unregister_dynamic_binding(app, id, unregister, configured_binding.as_ref());
+                    registered_map.remove(id);
+                    if let Some(new_binding) = configured_binding {
+                        if register_dynamic_binding(app, id, new_binding) {
+                            registered_map.insert(id.to_string(), register);
+                        }
                     }
                 }
             }
@@ -232,6 +298,7 @@ pub fn change_binding(
             settings.bindings.insert(id.clone(), b.clone());
             settings::write_settings(&app, settings);
             crate::secure_input::reconcile_fallback(&app);
+            schedule_cancel_reconcile(&app);
             return Ok(BindingResponse {
                 success: true,
                 binding: Some(b.clone()),
@@ -1537,5 +1604,48 @@ mod tests {
             assert!(key.parse::<Shortcut>().is_ok(), "Tauri rejected {key}");
             assert!(key.parse::<Hotkey>().is_ok(), "HandyKeys rejected {key}");
         }
+    }
+
+    #[test]
+    fn dynamic_shortcut_reconcile_unregisters_actually_registered_key_when_setting_changed() {
+        use super::{compute_reconcile_action, ReconcileAction};
+
+        // 1. Initial registration during recording: nothing was registered yet
+        let action = compute_reconcile_action(None, true, Some("escape"));
+        assert_eq!(action, ReconcileAction::RegisterOnly("escape".to_string()));
+
+        // 2. User changed binding from "escape" to "f12" while recording is active:
+        // must unregister "escape" (the registered key) and register "f12"
+        let action = compute_reconcile_action(Some("escape"), true, Some("f12"));
+        assert_eq!(
+            action,
+            ReconcileAction::Rebind {
+                unregister: "escape".to_string(),
+                register: "f12".to_string(),
+            }
+        );
+
+        // 3. User changed binding from "escape" to "f12", but reconcile runs after recording stopped:
+        // must unregister "escape" (the actually registered key), NOT "f12"
+        let action = compute_reconcile_action(Some("escape"), false, Some("f12"));
+        assert_eq!(
+            action,
+            ReconcileAction::UnregisterOnly("escape".to_string())
+        );
+
+        // 4. Normal unregister on stop when setting did not change:
+        let action = compute_reconcile_action(Some("escape"), false, Some("escape"));
+        assert_eq!(
+            action,
+            ReconcileAction::UnregisterOnly("escape".to_string())
+        );
+
+        // 5. Already up to date during recording: noop
+        let action = compute_reconcile_action(Some("escape"), true, Some("escape"));
+        assert_eq!(action, ReconcileAction::Noop);
+
+        // 6. Idle and nothing registered: noop
+        let action = compute_reconcile_action(None, false, Some("escape"));
+        assert_eq!(action, ReconcileAction::Noop);
     }
 }

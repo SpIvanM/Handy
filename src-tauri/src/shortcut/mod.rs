@@ -142,7 +142,7 @@ fn unregister_dynamic_binding(
     id: &str,
     key_to_unregister: String,
     configured_binding: Option<&ShortcutBinding>,
-) {
+) -> bool {
     let mut binding = configured_binding
         .cloned()
         .unwrap_or_else(|| ShortcutBinding {
@@ -153,8 +153,12 @@ fn unregister_dynamic_binding(
             current_binding: key_to_unregister.clone(),
         });
     binding.current_binding = key_to_unregister;
-    if let Err(e) = unregister_shortcut(app, binding) {
-        error!("Failed to unregister {} shortcut: {}", id, e);
+    match unregister_shortcut(app, binding) {
+        Ok(()) => true,
+        Err(e) => {
+            error!("Failed to unregister {} shortcut: {}", id, e);
+            false
+        }
     }
 }
 
@@ -190,32 +194,28 @@ fn reconcile_cancel_shortcut(app: &AppHandle) {
                 .as_ref()
                 .map(|b| b.current_binding.as_str());
 
-            match compute_reconcile_action(registered_key.as_deref(), requested, configured_key) {
-                ReconcileAction::Noop => {}
-                ReconcileAction::UnregisterOnly(old_key) => {
-                    unregister_dynamic_binding(app, id, old_key, configured_binding.as_ref());
-                    registered_map.remove(id);
-                }
-                ReconcileAction::RegisterOnly(new_key) => {
-                    if let Some(new_binding) = configured_binding {
-                        if register_dynamic_binding(app, id, new_binding) {
-                            registered_map.insert(id.to_string(), new_key);
-                        }
+            let action =
+                compute_reconcile_action(registered_key.as_deref(), requested, configured_key);
+            apply_reconcile_action(
+                id,
+                action,
+                &mut registered_map,
+                |id, old_key| {
+                    unregister_dynamic_binding(
+                        app,
+                        id,
+                        old_key.to_string(),
+                        configured_binding.as_ref(),
+                    )
+                },
+                |id, _new_key| {
+                    if let Some(new_binding) = configured_binding.clone() {
+                        register_dynamic_binding(app, id, new_binding)
+                    } else {
+                        false
                     }
-                }
-                ReconcileAction::Rebind {
-                    unregister,
-                    register,
-                } => {
-                    unregister_dynamic_binding(app, id, unregister, configured_binding.as_ref());
-                    registered_map.remove(id);
-                    if let Some(new_binding) = configured_binding {
-                        if register_dynamic_binding(app, id, new_binding) {
-                            registered_map.insert(id.to_string(), register);
-                        }
-                    }
-                }
-            }
+                },
+            );
         }
     }
 }
@@ -1586,9 +1586,47 @@ pub async fn get_available_accelerators(
     .expect("get_available_accelerators panicked")
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
+pub(crate) fn apply_reconcile_action<U, R>(
+    id: &str,
+    action: ReconcileAction,
+    registered_map: &mut std::collections::HashMap<String, String>,
+    mut unregister_fn: U,
+    mut register_fn: R,
+) where
+    U: FnMut(&str, &str) -> bool,
+    R: FnMut(&str, &str) -> bool,
+{
+    match action {
+        ReconcileAction::Noop => {}
+        ReconcileAction::UnregisterOnly(old_key) => {
+            if unregister_fn(id, &old_key) {
+                registered_map.remove(id);
+            }
+        }
+        ReconcileAction::RegisterOnly(new_key) => {
+            if register_fn(id, &new_key) {
+                registered_map.insert(id.to_string(), new_key);
+            }
+        }
+        ReconcileAction::Rebind {
+            unregister,
+            register,
+        } => {
+            if unregister_fn(id, &unregister) {
+                registered_map.remove(id);
+                if register_fn(id, &register) {
+                    registered_map.insert(id.to_string(), register);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use handy_keys::Hotkey;
+    use std::collections::HashMap;
     use tauri_plugin_global_shortcut::Shortcut;
 
     #[test]
@@ -1647,5 +1685,188 @@ mod tests {
         // 6. Idle and nothing registered: noop
         let action = compute_reconcile_action(None, false, Some("escape"));
         assert_eq!(action, ReconcileAction::Noop);
+    }
+
+    #[test]
+    fn apply_reconcile_action_keeps_entry_when_unregister_fails() {
+        use super::{apply_reconcile_action, ReconcileAction};
+
+        let mut map = HashMap::new();
+        map.insert("confirm".to_string(), "enter".to_string());
+
+        // Failed unregister must keep "enter" in map so next reconcile pass retries
+        let mut unregister_calls = 0;
+        apply_reconcile_action(
+            "confirm",
+            ReconcileAction::UnregisterOnly("enter".to_string()),
+            &mut map,
+            |_id, _key| {
+                unregister_calls += 1;
+                false
+            },
+            |_id, _key| unreachable!("register should not be called"),
+        );
+
+        assert_eq!(unregister_calls, 1);
+        assert_eq!(
+            map.get("confirm"),
+            Some(&"enter".to_string()),
+            "Failed unregister must NOT remove the entry from map"
+        );
+
+        // Subsequent pass succeeds: entry is removed
+        apply_reconcile_action(
+            "confirm",
+            ReconcileAction::UnregisterOnly("enter".to_string()),
+            &mut map,
+            |_id, _key| {
+                unregister_calls += 1;
+                true
+            },
+            |_id, _key| unreachable!("register should not be called"),
+        );
+
+        assert_eq!(unregister_calls, 2);
+        assert_eq!(map.get("confirm"), None);
+    }
+
+    #[test]
+    fn apply_reconcile_action_rebind_failure_preserves_old_key_and_skips_register() {
+        use super::{apply_reconcile_action, ReconcileAction};
+
+        let mut map = HashMap::new();
+        map.insert("confirm".to_string(), "enter".to_string());
+
+        let mut unregister_called = false;
+        let mut register_called = false;
+
+        apply_reconcile_action(
+            "confirm",
+            ReconcileAction::Rebind {
+                unregister: "enter".to_string(),
+                register: "return".to_string(),
+            },
+            &mut map,
+            |_id, _key| {
+                unregister_called = true;
+                false // unregister fails
+            },
+            |_id, _key| {
+                register_called = true;
+                true
+            },
+        );
+
+        assert!(unregister_called);
+        assert!(
+            !register_called,
+            "Register must not be attempted if unregister failed"
+        );
+        assert_eq!(
+            map.get("confirm"),
+            Some(&"enter".to_string()),
+            "Old key must be preserved in map on unregister failure"
+        );
+    }
+
+    #[test]
+    fn apply_reconcile_action_rebind_success() {
+        use super::{apply_reconcile_action, ReconcileAction};
+
+        let mut map = HashMap::new();
+        map.insert("confirm".to_string(), "enter".to_string());
+
+        let mut unregister_called = false;
+        let mut register_called = false;
+
+        apply_reconcile_action(
+            "confirm",
+            ReconcileAction::Rebind {
+                unregister: "enter".to_string(),
+                register: "return".to_string(),
+            },
+            &mut map,
+            |_id, key| {
+                assert_eq!(key, "enter");
+                unregister_called = true;
+                true
+            },
+            |_id, key| {
+                assert_eq!(key, "return");
+                register_called = true;
+                true
+            },
+        );
+
+        assert!(unregister_called);
+        assert!(register_called);
+        assert_eq!(map.get("confirm"), Some(&"return".to_string()));
+    }
+
+    #[test]
+    fn apply_reconcile_action_rebind_unregister_succeeds_register_fails() {
+        use super::{apply_reconcile_action, ReconcileAction};
+
+        let mut map = HashMap::new();
+        map.insert("confirm".to_string(), "enter".to_string());
+
+        apply_reconcile_action(
+            "confirm",
+            ReconcileAction::Rebind {
+                unregister: "enter".to_string(),
+                register: "return".to_string(),
+            },
+            &mut map,
+            |_id, _key| true,
+            |_id, _key| false, // register fails
+        );
+
+        // Old key was unregistered, but new key failed to register: map should have neither
+        assert_eq!(map.get("confirm"), None);
+    }
+
+    #[test]
+    fn apply_reconcile_action_register_only() {
+        use super::{apply_reconcile_action, ReconcileAction};
+
+        let mut map = HashMap::new();
+
+        // 1. Failed register does not insert
+        apply_reconcile_action(
+            "confirm",
+            ReconcileAction::RegisterOnly("enter".to_string()),
+            &mut map,
+            |_id, _key| unreachable!(),
+            |_id, _key| false,
+        );
+        assert_eq!(map.get("confirm"), None);
+
+        // 2. Successful register inserts
+        apply_reconcile_action(
+            "confirm",
+            ReconcileAction::RegisterOnly("enter".to_string()),
+            &mut map,
+            |_id, _key| unreachable!(),
+            |_id, _key| true,
+        );
+        assert_eq!(map.get("confirm"), Some(&"enter".to_string()));
+    }
+
+    #[test]
+    fn apply_reconcile_action_noop() {
+        use super::{apply_reconcile_action, ReconcileAction};
+
+        let mut map = HashMap::new();
+        map.insert("confirm".to_string(), "enter".to_string());
+
+        apply_reconcile_action(
+            "confirm",
+            ReconcileAction::Noop,
+            &mut map,
+            |_id, _key| unreachable!(),
+            |_id, _key| unreachable!(),
+        );
+
+        assert_eq!(map.get("confirm"), Some(&"enter".to_string()));
     }
 }

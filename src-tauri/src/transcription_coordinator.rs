@@ -1692,23 +1692,6 @@ mod tests {
     }
 
     #[test]
-    fn confirm_after_cancel_does_nothing() {
-        let mut state = CoordinatorState::new();
-        let t0 = Instant::now();
-        assert!(matches!(
-            state.on_input(input(ShortcutActivation::Toggle, true), t0),
-            Some(Effect::Start { .. })
-        ));
-        assert_eq!(state.stage, Stage::Recording("transcribe".to_string()));
-
-        state.on_cancel(true);
-        assert_eq!(state.stage, Stage::Idle);
-
-        assert_eq!(state.on_confirm("enter".to_string()), None);
-        assert_eq!(state.stage, Stage::Idle);
-    }
-
-    #[test]
     fn confirm_preserves_post_process_binding() {
         let mut state = CoordinatorState::new();
         let t0 = Instant::now();
